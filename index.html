@@ -144,15 +144,17 @@ async function loadPDF(url){
     if(outline && outline.length){ buildTOC(outline); tocToggle.checked=true; viewerWrap.classList.remove('toc-hidden'); }
     else { tocToggle.checked=false; viewerWrap.classList.add('toc-hidden'); }
   }catch{}
-  initFlip();
 
-  // ⬇ 초기 렌더 완료 → PageFlip에 주입을 100ms 지연 (타이밍 오류 방지)
+  // ❗ PageFlip 로더가 확실히 준비되도록 약간 지연
+  setTimeout(initFlip, 300);
+
+  // 첫 두 페이지 렌더 후, flip/linear 주입도 지연 호출
   await ensureRendered(1);
   if(state.total>=2) await ensureRendered(2);
   setTimeout(() => {
     try { feedFlipInitial(); } catch(e) { console.warn("Flip init delay:", e); }
     preloader.hidden = true;
-  }, 100);
+  }, 150);
 }
 
 function buildTOC(outline){
@@ -223,27 +225,46 @@ async function ensureRendered(pageNumber){
 function feedFlipInitial(){
   const flipEl = document.getElementById('flipbook');
   if (flipEl.querySelector('#linear')) {
+    // 폴백 모드: 세로 나열
     const linear = flipEl.querySelector('#linear');
     linear.style.display='grid'; linear.style.placeItems='center';
     for(let i=1;i<=state.total;i++){
       const slot = state.pages[i-1];
-      if (!slot?.img) continue;             /* 방어 한 줄 */
+      if (!slot?.img) continue;
       const holder=document.createElement('div'); holder.style.margin='12px';
       holder.appendChild(slot.img); linear.appendChild(holder);
     }
   } else {
+    // PageFlip 모드
     const nodes=[];
     for(let i=1;i<=Math.min(4,state.total);i++){
       const slot = state.pages[i-1];
-      if (!slot?.img) continue;             /* 방어 한 줄 */
+      if (!slot?.img) continue;
       const node=document.createElement('div'); node.className='page'; node.appendChild(slot.img); nodes.push(node);
     }
-    state.flip.loadFromHTML(nodes);
+    if(nodes.length) state.flip.loadFromHTML(nodes);
   }
 }
 
 function cleanupFlip(){ const c=document.getElementById('flipbook'); if(state.flip && state.flip.destroy) try{state.flip.destroy();}catch(e){} c.innerHTML=''; state.flip=null; }
-function goTo(n){ if(!state.flip || !state.flip.flip) return; n=Math.max(1, Math.min(state.total, n)); state.flip.flip(n); }
+
+// 선형/플립 모두 지원하는 이동
+function goTo(n){
+  const isLinear = !!document.querySelector('#flipbook #linear');
+  if(isLinear){
+    // 다음/이전 스크롤 방식
+    const pages = Array.from(document.querySelectorAll('#flipbook #linear > div'));
+    n = Math.max(1, Math.min(state.total, n));
+    const target = pages[n-1];
+    if(target) target.scrollIntoView({behavior:'smooth', block:'start'});
+    state.current = n;
+    pageLabel.textContent = `${state.current} / ${state.total}`;
+    return;
+  }
+  if(!state.flip || !state.flip.flip) return;
+  n=Math.max(1, Math.min(state.total, n));
+  state.flip.flip(n);
+}
 
 $("prevBtn").onclick = ()=> goTo(state.current-1);
 $("nextBtn").onclick = ()=> goTo(state.current+1);
@@ -254,14 +275,19 @@ $("fitBtn").onclick = async ()=>{ state.scale=1.0; await rerenderAround(true); }
 async function rerenderAround(){ preloader.hidden=false;
   const pages=[state.current-1,state.current,state.current+1].filter(n=>n>=1&&n<=state.total);
   for(const p of pages){ state.pages[p-1].img=null; await ensureRendered(p); }
-  cleanupFlip(); initFlip();
-  /* 재초기화 시에도 동일 타이밍 보장 */
-  setTimeout(()=>{ try{ feedFlipInitial(); }catch(e){ console.warn('Flip reinit delay:', e); } preloader.hidden=true; }, 100);
+  cleanupFlip();
+  setTimeout(()=>{ initFlip(); setTimeout(()=>{ try{ feedFlipInitial(); }catch(e){} preloader.hidden=true; }, 150); }, 300);
 }
 
 $("fsBtn").onclick = ()=>{ const el = document.documentElement; if(!document.fullscreenElement){ el.requestFullscreen?.(); document.body.classList.add('fullscreen'); } else { document.exitFullscreen?.(); document.body.classList.remove('fullscreen'); } };
 $("disableDl").addEventListener('change',(e)=>{ state.disableDownload=e.target.checked; document.addEventListener('contextmenu', blockCtx, {capture:true}); if(!state.disableDownload){ document.removeEventListener('contextmenu', blockCtx, {capture:true}); } });
 function blockCtx(ev){ if(state.disableDownload) ev.preventDefault(); }
+
+// 키보드 좌우 이동
+document.addEventListener('keydown', (e)=>{
+  if(e.key==='ArrowRight') $("nextBtn").click();
+  if(e.key==='ArrowLeft') $("prevBtn").click();
+});
 
 initFiles();
 })();
