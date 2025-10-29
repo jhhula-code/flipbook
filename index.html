@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Flipbook Viewer</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="preconnect" href="https://unpkg.com" crossorigin>
+  <style>
+    :root{
+      --bg:#f7f3ea;           /* 배경색 커스터마이징 */
+      --ink:#2b2b2b;          /* 글자색 */
+      --brand:#254B4F;        /* 버튼/포커스 색 (사용자 팔레트와 호환) */
+      --brand-ink:#F5E9D8;    /* 버튼 텍스트 색 */
+      --panel:#ffffff;        /* 컨트롤 바 */
+      --muted:#a0a0a0;
+    }
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,Segoe UI,Roboto,Apple SD Gothic Neo,Malgun Gothic,Noto Sans KR,sans-serif}
+    .app{display:grid;grid-template-rows:auto 1fr; height:100%;}
+    header{display:flex;align-items:center;gap:.75rem;padding:.5rem .75rem;background:var(--panel);border-bottom:1px solid #e7e2d7;position:sticky;top:0;z-index:5}
+    header .logo{display:flex;align-items:center;gap:.5rem}
+    header img.logo-img{height:28px;width:auto;object-fit:contain}
+    header .brand{font-weight:700}
+    .toolbar{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-left:auto}
+    .toolbar button,.toolbar select,.toolbar label{font-size:.9rem}
+    .btn{border:1px solid #ddd;background:#fff;padding:.45rem .65rem;border-radius:.5rem;cursor:pointer}
+    .btn.brand{background:var(--brand);color:var(--brand-ink);border-color:transparent}
+    .btn[disabled]{opacity:.5;cursor:not-allowed}
+    .btn-toggle{display:inline-flex;align-items:center;gap:.35rem}
+    .sep{width:1px;height:28px;background:#e4ded2;margin:0 .25rem}
+    .viewer-wrap{display:grid;grid-template-columns: 260px 1fr; gap:0; height:100%; min-height:0}
+    .viewer-wrap.toc-hidden{grid-template-columns:0 1fr}
+    nav#toc{overflow:auto;border-right:1px solid #eadfcd;background:#fcfbf7}
+    nav#toc h3{margin:.75rem 1rem .25rem;font-size:.95rem;color:#6e5f46}
+    nav#toc ul{list-style:none;margin:0;padding:.25rem .5rem .75rem}
+    nav#toc li{padding:.25rem .5rem}
+    nav#toc a{color:var(--ink);text-decoration:none;font-size:.9rem}
+    nav#toc a:hover{color:var(--brand)}
+
+    .stage{position:relative;overflow:auto;background:linear-gradient(45deg, rgba(0,0,0,.02), rgba(0,0,0,.06)); display:grid; place-items:center}
+    #flipbook{width:min(92vw,1100px);height:min(80vh, 880px);}
+    .page-preloader{position:absolute;inset:0;display:grid;place-items:center;color:#6b6b6b;font-size:.95rem}
+
+    /* 페이지 그림자/가장자리 느낌 */
+    .stf__block{box-shadow:0 10px 40px rgba(0,0,0,.10)}
+
+    /* 접근성 힌트 */
+    .hint{font-size:.8rem;color:#6f6f6f;margin-left:.5rem}
+
+    /* 전체화면 시 배경 고정 */
+    .fullscreen{background:var(--bg)}
+
+    /* 작은 화면에서 툴바 정돈 */
+    @media (max-width:900px){
+      .viewer-wrap{grid-template-columns: 0 1fr}
+    }
+  </style>
+  <!-- PDF.js (core + worker) -->
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.8.69/build/pdf.min.js"></script>
+  <script>pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.8.69/build/pdf.worker.min.js";</script>
+  <!-- StPageFlip (3D 넘김) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/stpageflip@2.0.7/dist/css/stpageflip.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/stpageflip@2.0.7/dist/js/stpageflip.min.js"></script>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="logo">
+      <img class="logo-img" src="./assets/logo.png" alt="logo" onerror="this.style.display='none'">
+      <div class="brand">Flipbook</div>
+    </div>
+    <div class="toolbar">
+      <label>파일:
+        <select id="fileSelect" class="btn"></select>
+      </label>
+      <button id="prevBtn" class="btn" title="이전 페이지">◀</button>
+      <button id="nextBtn" class="btn" title="다음 페이지">▶</button>
+      <span id="pageLabel" class="hint">- / -</span>
+      <span class="sep"></span>
+      <button id="zoomOut" class="btn" title="축소">－</button>
+      <button id="zoomIn" class="btn" title="확대">＋</button>
+      <button id="fitBtn" class="btn" title="화면맞춤">맞춤</button>
+      <span class="sep"></span>
+      <button id="fsBtn" class="btn brand" title="전체화면">⛶</button>
+      <label class="btn btn-toggle"><input type="checkbox" id="tocToggle" checked> 목차</label>
+      <label class="btn btn-toggle"><input type="checkbox" id="disableDl"> 다운로드 비활성화</label>
+    </div>
+  </header>
+
+  <div class="viewer-wrap" id="viewerWrap">
+    <nav id="toc"><h3>목차</h3><ul id="tocList"></ul></nav>
+    <main class="stage" id="stage">
+      <div id="flipbook"></div>
+      <div class="page-preloader" id="preloader" hidden>페이지 준비 중…</div>
+    </main>
+  </div>
+</div>
+
+<script>
+/**
+ * Flipbook PDF Viewer
+ * - ebooks/manifest.json 로 파일 목록 로드
+ * - ?file= 경로로 단독 지정 가능 (origin 동일 필요)
+ * - PDF.js로 각 페이지를 캔버스→이미지로 렌더링 (지연 로드)
+ * - StPageFlip으로 3D 넘김, 드래그/클릭 네비게이션
+ * - 확대/축소, 화면맞춤, 전체화면, 목차(Outline), 링크 주석 활성화
+ * - "다운로드 비활성화" 체크 시 브라우저 기본 컨텍스트 저장/드래그 차단(완전 차단 불가)
+ */
+
+const state = {
+  pdf: null,
+  total: 0,
+  scale: 1.0,
+  minScale: 0.6,
+  maxScale: 2.5,
+  fitBase: 1.0,
+  pages: [],       // {img:HTMLImageElement|null, rendering:boolean}
+  flip: null,
+  current: 1,
+  manifest: [],
+  disableDownload: false,
+};
+
+const el = sel => document.querySelector(sel);
+const $ = id => document.getElementById(id);
+
+const fileSelect = $("fileSelect");
+const pageLabel = $("pageLabel");
+const preloader = $("preloader");
+const tocList = $("tocList");
+const tocToggle = $("tocToggle");
+const viewerWrap = $("viewerWrap");
+
+async function fetchJSON(url){
+  const res = await fetch(url);
+  if(!res.ok) throw new Error(`JSON 읽기 실패: ${res.status}`);
+  return await res.json();
+}
+
+function getQuery(name){
+  const u = new URL(location.href);
+  return u.searchParams.get(name);
+}
+
+async function initFiles(){
+  // 1) URL ?file= 우선
+  const q = getQuery('file');
+  // 2) manifest.json 로드 (없으면 무시)
+  try{
+    state.manifest = await fetchJSON('./ebooks/manifest.json');
+  }catch(e){ state.manifest = []; }
+
+  // 셀렉트 채우기
+  fileSelect.innerHTML = '';
+  const placeholder = document.createElement('option');
+  placeholder.textContent = '파일을 선택하세요';
+  placeholder.value = '';
+  fileSelect.appendChild(placeholder);
+
+  state.manifest.forEach(item => {
+    const opt = document.createElement('option');
+    opt.value = item.url;
+    opt.textContent = item.title || item.url.split('/').pop();
+    fileSelect.appendChild(opt);
+  });
+
+  if(q){
+    // manifest에 없어도 직접 로드 허용(동일 오리진 권장)
+    await loadPDF(q);
+  }else if(state.manifest[0]){
+    fileSelect.value = state.manifest[0].url;
+    await loadPDF(state.manifest[0].url);
+  }
+}
+
+fileSelect.addEventListener('change', async e=>{
+  if(!e.target.value) return;
+  await loadPDF(e.target.value);
+});
+
+async function loadPDF(url){
+  cleanupFlip();
+  preloader.hidden = false;
+  pageLabel.textContent = '- / -';
+  tocList.innerHTML = '';
+
+  // 캐시 버스트 방지 옵션 (필요 시): {disableStream: true, disableAutoFetch: true}
+  const task = pdfjsLib.getDocument({ url });
+  state.pdf = await task.promise;
+  state.total = state.pdf.numPages;
+  state.pages = Array.from({length: state.total}, ()=>({img:null, rendering:false}));
+  pageLabel.textContent = `1 / ${state.total}`;
+
+  // 목차(Outline)
+  try{
+    const outline = await state.pdf.getOutline();
+    if(outline && outline.length){
+      buildTOC(outline);
+      tocToggle.checked = true;
+      viewerWrap.classList.remove('toc-hidden');
+    }else{
+      tocToggle.checked = false;
+      viewerWrap.classList.add('toc-hidden');
+    }
+  }catch{ /* ignore */ }
+
+  // 플립북 초기화
+  initFlip();
+
+  // 첫 두 페이지 선렌더링 → 플립북 공급
+  await ensureRendered(1);
+  if(state.total >= 2) await ensureRendered(2);
+  feedFlipInitial();
+
+  preloader.hidden = true;
+}
+
+function buildTOC(outline){
+  tocList.innerHTML = '';
+  const walk = (items, ul)=>{
+    items.forEach(item=>{
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.textContent = item.title || '제목 없음';
+      a.href = '#';
+      a.addEventListener('click', async (e)=>{
+        e.preventDefault();
+        const dest = await state.pdf.getDestination(item.dest);
+        const pageIndex = dest?.[0]?.num ? dest[0].num : (dest?.[0]?.pageNumber || 1);
+        goTo(pageIndex);
+      });
+      li.appendChild(a);
+      ul.appendChild(li);
+      if(item.items?.length){
+        const childUl = document.createElement('ul');
+        li.appendChild(childUl);
+        walk(item.items, childUl);
+      }
+    });
+  };
+  const root = document.createElement('ul');
+  tocList.appendChild(root);
+  walk(outline, root);
+}
+
+tocToggle.addEventListener('change',()=>{
+  viewerWrap.classList.toggle('toc-hidden', !tocToggle.checked);
+});
+
+function initFlip(){
+  const container = document.getElementById('flipbook');
+  container.innerHTML = '';
+  state.flip = new St.PageFlip(container, {
+    width: 520,
+    height: 720,
+    size: 'stretch',
+    maxShadowOpacity: 0.2,
+    showCover: false,
+    useMouseEvents: true,
+    flippingTime: 600,
+    drawShadow: true,
+    autoSize: true,
+  });
+  state.flip.on('flip', async (e)=>{
+    state.current = e.data; // 1-based
+    pageLabel.textContent = `${state.current} / ${state.total}`;
+    // 인접 페이지 지연 로드
+    const around = [state.current-2,state.current-1,state.current+1,state.current+2].filter(n=>n>=1 && n<=state.total);
+    for(const p of around){ await ensureRendered(p); updateFlipPage(p); }
+  });
+}
+
+function imgPageTemplate(src){
+  const el = document.createElement('div');
+  el.className = 'page';
+  el.innerHTML = `<div class="page__content" style="height:100%"><img src="${src}" alt="page" style="width:100%;height:100%;object-fit:contain;user-select:none;pointer-events:${state.disableDownload?'none':'auto'}"></div>`;
+  return el;
+}
+
+async function ensureRendered(pageNumber){
+  const slot = state.pages[pageNumber-1];
+  if(slot.img || slot.rendering) return;
+  slot.rendering = true;
+  const page = await state.pdf.getPage(pageNumber);
+  // 화면에 맞춘 기준 스케일 계산
+  const viewport = page.getViewport({ scale: 1 });
+  const container = document.getElementById('flipbook');
+  const basis = Math.min((container.clientWidth/2) / viewport.width, container.clientHeight / viewport.height);
+  const scale = Math.max(1, basis) * state.scale; // 선명도 보정
+  const v2 = page.getViewport({ scale });
+
+  // 캔버스 렌더 & 링크 주석 처리 레이어
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', {alpha:false});
+  canvas.width = Math.floor(v2.width);
+  canvas.height = Math.floor(v2.height);
+  await page.render({ canvasContext: ctx, viewport: v2, intent: 'display' }).promise;
+
+  // 링크 주석을 이미지 위에 전달할 수 없으므로, 이미지맵을 사용해 클릭 영역을 재구성
+  // (PDF.js의 annotations를 읽어와 a태그 좌표로 변환)
+  const annotations = await page.getAnnotations();
+  const imgURL = canvas.toDataURL('image/jpeg', 0.92);
+  const wrapper = document.createElement('div');
+  wrapper.style.position = 'relative';
+  wrapper.style.width = v2.width + 'px';
+  wrapper.style.height = v2.height + 'px';
+
+  const img = new Image();
+  img.src = imgURL;
+  img.draggable = false;
+  Object.assign(img.style,{width:'100%',height:'100%',userSelect:'none'});
+  wrapper.appendChild(img);
+
+  const linkLayer = document.createElement('div');
+  linkLayer.style.position='absolute';
+  linkLayer.style.inset='0';
+  linkLayer.style.pointerEvents = state.disableDownload ? 'none':'auto';
+  wrapper.appendChild(linkLayer);
+
+  const transform = pdfjsLib.Util.transform;
+  const view = page.view; // [xMin, yMin, xMax, yMax]
+  const viewportTransform = v2.transform;
+  const outputScale = 1;
+
+  annotations.filter(a=>a.subtype==='Link' && a.rect).forEach(a=>{
+    let rect = pdfjsLib.Util.normalizeRect(a.rect);
+    // 좌표 변환
+    let m = transform(viewportTransform, [1,0,0, -1, 0, v2.height]);
+    let x1 = rect[0], y1 = rect[1], x2 = rect[2], y2 = rect[3];
+    let p1 = pdfjsLib.Util.applyTransform([x1,y1], m);
+    let p2 = pdfjsLib.Util.applyTransform([x2,y2], m);
+    const left = Math.min(p1[0], p2[0]) * outputScale;
+    const top = Math.min(p1[1], p2[1]) * outputScale;
+    const width = Math.abs(p1[0] - p2[0]) * outputScale;
+    const height = Math.abs(p1[1] - p2[1]) * outputScale;
+
+    const link = document.createElement('a');
+    link.href = a.url || '#';
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.style.position='absolute';
+    link.style.left = left + 'px';
+    link.style.top = top + 'px';
+    link.style.width = width + 'px';
+    link.style.height = height + 'px';
+    link.style.display='block';
+    link.style.outline='none';
+    link.style.background = 'rgba(0,0,0,0)';
+    linkLayer.appendChild(link);
+  });
+
+  // 최종 이미지를 dataURL로 보관 (PageFlip은 HTML 요소 입력 필요)
+  // 이미지맵과 링크레이어를 유지하려면 wrapper 전체를 페이지 DOM으로 사용
+  slot.img = wrapper; // wrapper는 div(상대배치) + img + 링크 레이어
+  slot.rendering = false;
+}
+
+function feedFlipInitial(){
+  const nodes = [];
+  for(let i=1;i<=Math.min(4,state.total);i++){
+    const node = document.createElement('div');
+    node.className = 'page';
+    node.appendChild(state.pages[i-1].img);
+    nodes.push(node);
+  }
+  state.flip.loadFromHTML(nodes);
+  state.flip.on('changeState', ()=>{
+    // 초기 로드 후 나머지 페이지는 필요 시 갱신
+  });
+}
+
+async function updateFlipPage(pageNumber){
+  if(!state.flip) return;
+  const idx = pageNumber-1;
+  if(!state.pages[idx].img) return; // 아직 미렌더
+  // StPageFlip은 특정 페이지 교체 API가 없어, 근접 시 미리 로드로 충분
+}
+
+function cleanupFlip(){
+  if(state.flip){
+    try{ state.flip.destroy(); }catch{}
+    state.flip = null;
+  }
+}
+
+function goTo(n){
+  if(!state.flip) return;
+  n = Math.max(1, Math.min(state.total, n));
+  state.flip.flip(n);
+}
+
+// Controls
+$("prevBtn").onclick = ()=> goTo(state.current-1);
+$("nextBtn").onclick = ()=> goTo(state.current+1);
+
+$("zoomIn").onclick = async ()=>{
+  state.scale = Math.min(state.maxScale, state.scale + 0.15);
+  await rerenderAround();
+};
+$("zoomOut").onclick = async ()=>{
+  state.scale = Math.max(state.minScale, state.scale - 0.15);
+  await rerenderAround();
+};
+$("fitBtn").onclick = async ()=>{
+  state.scale = 1.0; // 간단 맞춤(필요 시 컨테이너 기반 재계산)
+  await rerenderAround(true);
+};
+
+async function rerenderAround(reset=false){
+  preloader.hidden = false;
+  const pages = [state.current-1,state.current,state.current+1].filter(n=>n>=1&&n<=state.total);
+  for(const p of pages){
+    state.pages[p-1].img = null; // 강제 재생성
+    await ensureRendered(p);
+  }
+  // 초기 4장 다시 공급 (간단 구현)
+  cleanupFlip();
+  initFlip();
+  feedFlipInitial();
+  preloader.hidden = true;
+}
+
+// 전체화면
+$("fsBtn").onclick = ()=>{
+  const el = document.documentElement;
+  if(!document.fullscreenElement){
+    el.requestFullscreen?.();
+    document.body.classList.add('fullscreen');
+  }else{
+    document.exitFullscreen?.();
+    document.body.classList.remove('fullscreen');
+  }
+};
+
+// 다운로드 비활성화(강화 불가, UI 차단 및 기본 제스처 억제)
+$("disableDl").addEventListener('change',(e)=>{
+  state.disableDownload = e.target.checked;
+  document.addEventListener('contextmenu', blockCtx, {capture:true});
+  if(!state.disableDownload){ document.removeEventListener('contextmenu', blockCtx, {capture:true}); }
+});
+function blockCtx(ev){ if(state.disableDownload) ev.preventDefault(); }
+
+// 터치/드래그 힌트: StPageFlip이 기본 처리, 별도 커서 방지
+
+// 시작
+initFiles();
+
+</script>
+
+<!-- ========================= manifest & assets 안내 =========================
+프로젝트 루트에 아래 구조로 배치하세요 (GitHub Pages 호환):
+
+/ (repo root)
+  index.html  ← 본 파일 하나만으로 동작
+  /ebooks
+    manifest.json  ← { "title":"표시명", "url":"./ebooks/샘플.pdf" } 목록
+    샘플.pdf
+  /assets
+    logo.png       ← 헤더 로고 (선택)
+
+manifest.json 예시:
+[
+  { "title": "샘플 전자책", "url": "./ebooks/sample.pdf" },
+  { "title": "두번째 책", "url": "./ebooks/book2.pdf" }
+]
+
+URL 직접 지정도 가능: https://사용자.github.io/리포지토리/?file=./ebooks/sample.pdf
+동일 오리진(같은 사이트) 경로를 권장합니다.
+======================================================================== -->
+</body>
+</html>
