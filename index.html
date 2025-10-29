@@ -139,23 +139,54 @@ async function loadPDF(url){
   cleanupFlip(); preloader.hidden=false; pageLabel.textContent='- / -'; tocList.innerHTML='';
   const task = pdfjsLib.getDocument({url}); state.pdf = await task.promise; state.total = state.pdf.numPages;
   state.pages = Array.from({length: state.total}, ()=>({img:null, rendering:false})); pageLabel.textContent = `1 / ${state.total}`;
-  try{ const outline = await state.pdf.getOutline(); if(outline && outline.length){ buildTOC(outline); tocToggle.checked=true; viewerWrap.classList.remove('toc-hidden'); } else { tocToggle.checked=false; viewerWrap.classList.add('toc-hidden'); } }catch{}
+  try{
+    const outline = await state.pdf.getOutline();
+    if(outline && outline.length){ buildTOC(outline); tocToggle.checked=true; viewerWrap.classList.remove('toc-hidden'); }
+    else { tocToggle.checked=false; viewerWrap.classList.add('toc-hidden'); }
+  }catch{}
   initFlip();
-  await ensureRendered(1); if(state.total>=2) await ensureRendered(2); feedFlipInitial(); preloader.hidden=true;
+
+  // ⬇ 초기 렌더 완료 → PageFlip에 주입을 100ms 지연 (타이밍 오류 방지)
+  await ensureRendered(1);
+  if(state.total>=2) await ensureRendered(2);
+  setTimeout(() => {
+    try { feedFlipInitial(); } catch(e) { console.warn("Flip init delay:", e); }
+    preloader.hidden = true;
+  }, 100);
 }
 
 function buildTOC(outline){
-  tocList.innerHTML=''; const root=document.createElement('ul'); tocList.appendChild(root);
-  const walk=(items,ul)=>{ items.forEach(async item=>{ const li=document.createElement('li'); const a=document.createElement('a'); a.textContent=item.title||'제목 없음'; a.href='#'; a.addEventListener('click',async e=>{ e.preventDefault(); const dest=await state.pdf.getDestination(item.dest); const pageIndex = dest?.[0]?.num ? dest[0].num : (dest?.[0]?.pageNumber || 1); goTo(pageIndex); }); li.appendChild(a); ul.appendChild(li); if(item.items?.length){ const child=document.createElement('ul'); li.appendChild(child); walk(item.items, child);} }); };
+  tocList.innerHTML='';
+  const root=document.createElement('ul'); tocList.appendChild(root);
+  const walk=(items,ul)=>{
+    items.forEach(async item=>{
+      const li=document.createElement('li');
+      const a=document.createElement('a');
+      a.textContent=item.title||'제목 없음'; a.href='#';
+      a.addEventListener('click',async e=>{
+        e.preventDefault();
+        const dest=await state.pdf.getDestination(item.dest);
+        const pageIndex = dest?.[0]?.num ? dest[0].num : (dest?.[0]?.pageNumber || 1);
+        goTo(pageIndex);
+      });
+      li.appendChild(a); ul.appendChild(li);
+      if(item.items?.length){ const child=document.createElement('ul'); li.appendChild(child); walk(item.items, child); }
+    });
+  };
   walk(outline, root);
 }
 tocToggle.addEventListener('change',()=> viewerWrap.classList.toggle('toc-hidden', !tocToggle.checked));
 
 function initFlip(){
   const container = document.getElementById('flipbook'); container.innerHTML='';
-  if (window.St && St.PageFlip){
-    state.flip = new St.PageFlip(container, { width:520, height:720, size:'stretch', maxShadowOpacity:0.2, showCover:false, useMouseEvents:true, flippingTime:600, drawShadow:true, autoSize:true });
-    state.flip.on('flip', async (e)=>{ state.current = e.data; pageLabel.textContent = `${state.current} / ${state.total}`;
+  if (window.St && window.St.PageFlip){
+    state.flip = new window.St.PageFlip(container, {
+      width:520, height:720, size:'stretch', maxShadowOpacity:0.2,
+      showCover:false, useMouseEvents:true, flippingTime:600,
+      drawShadow:true, autoSize:true
+    });
+    state.flip.on('flip', async (e)=>{
+      state.current = e.data; pageLabel.textContent = `${state.current} / ${state.total}`;
       const around=[state.current-2,state.current-1,state.current+1,state.current+2].filter(n=>n>=1 && n<=state.total);
       for(const p of around){ await ensureRendered(p); }
     });
@@ -194,10 +225,19 @@ function feedFlipInitial(){
   if (flipEl.querySelector('#linear')) {
     const linear = flipEl.querySelector('#linear');
     linear.style.display='grid'; linear.style.placeItems='center';
-    for(let i=1;i<=state.total;i++){ const holder=document.createElement('div'); holder.style.margin='12px'; holder.appendChild(state.pages[i-1].img); linear.appendChild(holder); }
+    for(let i=1;i<=state.total;i++){
+      const slot = state.pages[i-1];
+      if (!slot?.img) continue;             /* 방어 한 줄 */
+      const holder=document.createElement('div'); holder.style.margin='12px';
+      holder.appendChild(slot.img); linear.appendChild(holder);
+    }
   } else {
     const nodes=[];
-    for(let i=1;i<=Math.min(4,state.total);i++){ const node=document.createElement('div'); node.className='page'; node.appendChild(state.pages[i-1].img); nodes.push(node); }
+    for(let i=1;i<=Math.min(4,state.total);i++){
+      const slot = state.pages[i-1];
+      if (!slot?.img) continue;             /* 방어 한 줄 */
+      const node=document.createElement('div'); node.className='page'; node.appendChild(slot.img); nodes.push(node);
+    }
     state.flip.loadFromHTML(nodes);
   }
 }
@@ -214,7 +254,9 @@ $("fitBtn").onclick = async ()=>{ state.scale=1.0; await rerenderAround(true); }
 async function rerenderAround(){ preloader.hidden=false;
   const pages=[state.current-1,state.current,state.current+1].filter(n=>n>=1&&n<=state.total);
   for(const p of pages){ state.pages[p-1].img=null; await ensureRendered(p); }
-  cleanupFlip(); initFlip(); feedFlipInitial(); preloader.hidden=true;
+  cleanupFlip(); initFlip();
+  /* 재초기화 시에도 동일 타이밍 보장 */
+  setTimeout(()=>{ try{ feedFlipInitial(); }catch(e){ console.warn('Flip reinit delay:', e); } preloader.hidden=true; }, 100);
 }
 
 $("fsBtn").onclick = ()=>{ const el = document.documentElement; if(!document.fullscreenElement){ el.requestFullscreen?.(); document.body.classList.add('fullscreen'); } else { document.exitFullscreen?.(); document.body.classList.remove('fullscreen'); } };
